@@ -5,6 +5,7 @@ let cachedProxyList = [];
 let proxyIP = "";
 
 // Constant
+const DOH_SERVER = "https://dns.google/dns-query";
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
 const CORS_HEADER_OPTIONS = {
@@ -82,7 +83,7 @@ export default {
 
                     if (ccMatch) {
                         proxyIP = ccMatch;
-                        return await websockerHandler(request);
+                        return await websocketHandler(request);
                     }
                 }
 
@@ -90,7 +91,7 @@ export default {
 
                 if (proxyMatch) {
                     proxyIP = proxyMatch[1];
-                    return await websockerHandler(request);
+                    return await websocketHandler(request);
                 }
             }
 
@@ -618,4 +619,22 @@ function safeCloseWebSocket(socket) {
     } catch (error) {
         console.error("safeCloseWebSocket error", error);
     }
+}
+
+function base64ToArrayBuffer(base64Str) {
+    if (!base64Str) {
+        return { error: null };
+    }
+    try {
+        base64Str = base64Str.replace(/-/g, "+").replace(/_/g, "/");
+        const decode = atob(base64Str);
+        const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
+        return { earlyData: arryBuffer.buffer, error: null };
+    } catch (error) {
+        return { error };
+    }
+}
+
+function arrayBufferToHex(buffer) {
+    return [...new Uint8Array(buffer)].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
