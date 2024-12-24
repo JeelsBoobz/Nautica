@@ -9,7 +9,7 @@ const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
 const CORS_HEADER_OPTIONS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
+  "Access-Control-Allow-Methods": "GET,POST,HEAD",
   "Access-Control-Max-Age": "86400",
 };
 
@@ -41,25 +41,25 @@ async function getProxyList(env, forceReload = false) {
 }
 
 async function reverseProxy(request, target) {
-  const targetUrl = new URL(request.url);
-  const targetChunk = target.split(":");
+    const targetUrl = new URL(request.url);
+    const targetChunk = target.split(":");
 
-  targetUrl.hostname = targetChunk[0];
-  targetUrl.port = targetChunk.toString() || "443";
+    targetUrl.hostname = targetChunk[0];
+    targetUrl.port = targetChunk.toString() || "443";
 
-  const modifiedRequest = new Request(targetUrl, request);
+    const modifiedRequest = new Request(targetUrl, request);
+ 
+    modifiedRequest.headers.set("X-Forwarded-Host", request.headers.get("Host"));
 
-  modifiedRequest.headers.set("X-Forwarded-Host", request.headers.get("Host"));
+    const response = await fetch(modifiedRequest);
 
-  const response = await fetch(modifiedRequest);
+    const newResponse = new Response(response.body, response);
+    for (const [key, value] of Object.entries(CORS_HEADER_OPTIONS)) {
+        newResponse.headers.set(key, value);
+    }
+    newResponse.headers.set("X-Proxied-By", "Cloudflare Worker");
 
-  const newResponse = new Response(response.body, response);
-  for (const [key, value] of Object.entries(CORS_HEADER_OPTIONS)) {
-    newResponse.headers.set(key, value);
-  }
-  newResponse.headers.set("X-Proxied-By", "Cloudflare Worker");
-
-  return newResponse;
+    return newResponse;
 }
 
 function getProxyCC(cc, proxyList) {
@@ -107,7 +107,7 @@ export default {
     },
 };
 
-async function websockerHandler(request) {
+async function websocketHandler(request) {
     const webSocketPair = new WebSocketPair();
     const [client, webSocket] = Object.values(webSocketPair);
 
@@ -149,7 +149,10 @@ async function websockerHandler(request) {
                         protocolHeader = parseTrojanHeader(chunk);
                     } else if (protocol === "VLESS") {
                         protocolHeader = parseVlessHeader(chunk);
+                    } else if (protocol === "Shadowsocks") {
+                        protocolHeader = parseShadowsocksHeader(chunk);
                     } else {
+                        parseVmessHeader(chunk);
                         throw new Error("Unknown Protocol!");
                     }
 
@@ -204,13 +207,24 @@ async function websockerHandler(request) {
 }
 
 async function protocolSniffer(buffer) {
-    if (buffer.byteLength >= 56) {
-        const trojanDelimiter = new Uint8Array(buffer.slice(56, 58));
+    if (buffer.byteLength >= 62) {
+        const trojanDelimiter = new Uint8Array(buffer.slice(56, 60));
         if (trojanDelimiter[0] === 0x0d && trojanDelimiter[1] === 0x0a) {
-            return "Trojan";
+            if (trojanDelimiter[2] === 0x01 || trojanDelimiter[2] === 0x03 || trojanDelimiter[2] === 0x7f) {
+                if (trojanDelimiter[3] === 0x01 || trojanDelimiter[3] === 0x03 || trojanDelimiter[3] === 0x04) {
+                    return "Trojan";
+                }
+            }
         }
     }
-    return "VLESS"; // Default protocol
+
+    const vlessDelimiter = new Uint8Array(buffer.slice(1, 17));
+    // Hanya mendukung UUID v4
+    if (arrayBufferToHex(vlessDelimiter).match(/^[0-9a-f]{8}[0-9a-f]{4}4[0-9a-f]{3}[89ab][0-9a-f]{3}[0-9a-f]{12}$/i)) {
+        return "VLESS";
+    }
+
+    return "Shadowsocks"; // default
 }
 
 async function handleTCPOutBound(
@@ -232,6 +246,7 @@ async function handleTCPOutBound(
         const writer = tcpSocket.writable.getWriter();
         await writer.write(rawClientData);
         writer.releaseLock();
+
         return tcpSocket;
     }
 
@@ -253,6 +268,60 @@ async function handleTCPOutBound(
     const tcpSocket = await connectAndWrite(addressRemote, portRemote);
 
     remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log);
+}
+
+async function handleUDPOutbound(webSocket, responseHeader, log) {
+    let isHeaderSent = false;
+    const transformStream = new TransformStream({
+        start(controller) {},
+        transform(chunk, controller) {
+            for (let index = 0; index < chunk.byteLength; ) {
+                const lengthBuffer = chunk.slice(index, index + 2);
+                const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
+                const udpData = new Uint8Array(chunk.slice(index + 2, index + 2 + udpPakcetLength));
+                index = index + 2 + udpPakcetLength;
+                controller.enqueue(udpData);
+            }
+        },
+        flush(controller) {},
+    });
+    transformStream.readable
+        .pipeTo(
+            new WritableStream({
+                async write(chunk) {
+                    const resp = await fetch(DOH_SERVER, {
+                        method: "POST",
+                        headers: {
+                            "content-type": "application/dns-message",
+                        },
+                        body: chunk,
+                    });
+                    const dnsQueryResult = await resp.arrayBuffer();
+                    const udpSize = dnsQueryResult.byteLength;
+                    const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
+                    if (webSocket.readyState === WS_READY_STATE_OPEN) {
+                        log(`doh success and dns message length is ${udpSize}`);
+                        if (isHeaderSent) {
+                            webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
+                        } else {
+                            webSocket.send(await new Blob([responseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
+                            isHeaderSent = true;
+                        }
+                    }
+                },
+            })
+        )
+        .catch((error) => {
+            log("dns udp has error" + error);
+        });
+
+    const writer = transformStream.writable.getWriter();
+
+    return {
+        write(chunk) {
+            writer.write(chunk);
+        },
+    };
 }
 
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
@@ -297,6 +366,66 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     });
 
     return stream;
+}
+
+function parseVmessHeader(vmessBuffer) {
+    // https://xtls.github.io/development/protocols/vmess.html#%E6%8C%87%E4%BB%A4%E9%83%A8%E5%88%86
+}
+
+function parseShadowsocksHeader(ssBuffer) {
+    const view = new DataView(ssBuffer);
+
+    const addressType = view.getUint8(0);
+    let addressLength = 0;
+    let addressValueIndex = 1;
+    let addressValue = "";
+
+    switch (addressType) {
+        case 1:
+            addressLength = 4;
+            addressValue = new Uint8Array(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
+            break;
+        case 3:
+            addressLength = new Uint8Array(ssBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
+            addressValueIndex += 1;
+            addressValue = new TextDecoder().decode(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+            break;
+        case 4:
+            addressLength = 16;
+            const dataView = new DataView(ssBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+            const ipv6 = [];
+            for (let i = 0; i < 8; i++) {
+                ipv6.push(dataView.getUint16(i * 2).toString(16));
+            }
+            addressValue = ipv6.join(":");
+            break;
+        default:
+            return {
+                hasError: true,
+                message: `Invalid addressType for Shadowsocks: ${addressType}`,
+            };
+    }
+
+    if (!addressValue) {
+        return {
+            hasError: true,
+            message: `Destination address empty, address type is: ${addressType}`,
+        };
+    }
+
+    const portIndex = addressValueIndex + addressLength;
+    const portBuffer = ssBuffer.slice(portIndex, portIndex + 2);
+    const portRemote = new DataView(portBuffer).getUint16(0);
+    return {
+        hasError: false,
+        addressRemote: addressValue,
+        addressType: addressType,
+        portRemote: portRemote,
+        rawDataIndex: portIndex + 2,
+        rawClientData: ssBuffer.slice(portIndex + 2),
+        version: null,
+        isUDP: portRemote == 53,
+    };
 }
 
 function parseVlessHeader(vlessBuffer) {
@@ -479,74 +608,6 @@ async function remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry, 
         log(`retry`);
         retry();
     }
-}
-
-function base64ToArrayBuffer(base64Str) {
-    if (!base64Str) {
-        return { error: null };
-    }
-    try {
-        base64Str = base64Str.replace(/-/g, "+").replace(/_/g, "/");
-        const decode = atob(base64Str);
-        const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
-        return { earlyData: arryBuffer.buffer, error: null };
-    } catch (error) {
-        return { error };
-    }
-}
-
-async function handleUDPOutbound(webSocket, responseHeader, log) {
-    let isVlessHeaderSent = false;
-    const transformStream = new TransformStream({
-        start(controller) {},
-        transform(chunk, controller) {
-            for (let index = 0; index < chunk.byteLength; ) {
-                const lengthBuffer = chunk.slice(index, index + 2);
-                const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
-                const udpData = new Uint8Array(chunk.slice(index + 2, index + 2 + udpPakcetLength));
-                index = index + 2 + udpPakcetLength;
-                controller.enqueue(udpData);
-            }
-        },
-        flush(controller) {},
-    });
-    transformStream.readable
-        .pipeTo(
-            new WritableStream({
-                async write(chunk) {
-                    const resp = await fetch("https://1.1.1.1/dns-query", {
-                        method: "POST",
-                        headers: {
-                            "content-type": "application/dns-message",
-                        },
-                        body: chunk,
-                    });
-                    const dnsQueryResult = await resp.arrayBuffer();
-                    const udpSize = dnsQueryResult.byteLength;
-                    const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
-                    if (webSocket.readyState === WS_READY_STATE_OPEN) {
-                        log(`doh success and dns message length is ${udpSize}`);
-                        if (isVlessHeaderSent) {
-                            webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-                        } else {
-                            webSocket.send(await new Blob([responseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-                            isVlessHeaderSent = true;
-                        }
-                    }
-                },
-            })
-        )
-        .catch((error) => {
-            log("dns udp has error" + error);
-        });
-
-    const writer = transformStream.writable.getWriter();
-
-    return {
-        write(chunk) {
-            writer.write(chunk);
-        },
-    };
 }
 
 function safeCloseWebSocket(socket) {
