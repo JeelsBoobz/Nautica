@@ -5,7 +5,8 @@ let cachedProxyList = [];
 let proxyIP = "";
 
 // Constant
-const DOH_SERVER = "https://dns.google/dns-query";
+const DNS_SERVER_ADDRESS = "1.1.1.1";
+const DNS_SERVER_PORT = 53;
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
 const CORS_HEADER_OPTIONS = {
@@ -126,15 +127,14 @@ async function websocketHandler(request) {
     let remoteSocketWrapper = {
         value: null,
     };
-    let udpStreamWrite = null;
     let isDNS = false;
 
     readableWebSocketStream
         .pipeTo(
             new WritableStream({
                 async write(chunk, controller) {
-                    if (isDNS && udpStreamWrite) {
-                        return udpStreamWrite(chunk);
+                    if (isDNS) {
+                        return handleUDPOutbound(DNS_SERVER_ADDRESS, DNS_SERVER_PORT, chunk, webSocket, null, log);
                     }
                     if (remoteSocketWrapper.value) {
                         const writer = remoteSocketWrapper.value.writable.getWriter();
@@ -168,15 +168,20 @@ async function websocketHandler(request) {
                         if (protocolHeader.portRemote === 53) {
                             isDNS = true;
                         } else {
+                            // return handleUDPOutbound(protocolHeader.addressRemote, protocolHeader.portRemote, chunk, webSocket, protocolHeader.version, log);
                             throw new Error("UDP only support for DNS port 53");
                         }
                     }
 
                     if (isDNS) {
-                        const { write } = await handleUDPOutbound(webSocket, protocolHeader.version, log);
-                        udpStreamWrite = write;
-                        udpStreamWrite(protocolHeader.rawClientData);
-                        return;
+                        return handleUDPOutbound(
+                            DNS_SERVER_ADDRESS,
+                            DNS_SERVER_PORT,
+                            chunk,
+                            webSocket,
+                            protocolHeader.version,
+                            log
+                        );
                     }
 
                     handleTCPOutBound(
@@ -271,58 +276,43 @@ async function handleTCPOutBound(
     remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log);
 }
 
-async function handleUDPOutbound(webSocket, responseHeader, log) {
-    let isHeaderSent = false;
-    const transformStream = new TransformStream({
-        start(controller) {},
-        transform(chunk, controller) {
-            for (let index = 0; index < chunk.byteLength; ) {
-                const lengthBuffer = chunk.slice(index, index + 2);
-                const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
-                const udpData = new Uint8Array(chunk.slice(index + 2, index + 2 + udpPakcetLength));
-                index = index + 2 + udpPakcetLength;
-                controller.enqueue(udpData);
-            }
-        },
-        flush(controller) {},
-    });
-    transformStream.readable
-        .pipeTo(
+async function handleUDPOutbound(targetAddress, targetPort, udpChunk, webSocket, responseHeader, log) {
+    try {
+        let protocolHeader = responseHeader;
+        const tcpSocket = connect({
+            hostname: targetAddress,
+            port: targetPort,
+        });
+
+        log(`Connected to ${targetAddress}:${targetPort}`);
+
+        const writer = tcpSocket.writable.getWriter();
+        await writer.write(udpChunk);
+        writer.releaseLock();
+
+        await tcpSocket.readable.pipeTo(
             new WritableStream({
                 async write(chunk) {
-                    const resp = await fetch(DOH_SERVER, {
-                        method: "POST",
-                        headers: {
-                            "content-type": "application/dns-message",
-                        },
-                        body: chunk,
-                    });
-                    const dnsQueryResult = await resp.arrayBuffer();
-                    const udpSize = dnsQueryResult.byteLength;
-                    const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
                     if (webSocket.readyState === WS_READY_STATE_OPEN) {
-                        log(`doh success and dns message length is ${udpSize}`);
-                        if (isHeaderSent) {
-                            webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
+                        if (protocolHeader) {
+                            webSocket.send(await new Blob([protocolHeader, chunk]).arrayBuffer());
+                            protocolHeader = null;
                         } else {
-                            webSocket.send(await new Blob([responseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-                            isHeaderSent = true;
+                            webSocket.send(chunk);
                         }
                     }
                 },
+                close() {
+                    log(`UDP connection to ${targetAddress} closed`);
+                },
+                abort(reason) {
+                    console.error(`UDP connection to ${targetPort} aborted due to ${reason}`);
+                },
             })
-        )
-        .catch((error) => {
-            log("dns udp has error" + error);
-        });
-
-    const writer = transformStream.writable.getWriter();
-
-    return {
-        write(chunk) {
-            writer.write(chunk);
-        },
-    };
+        );
+    } catch (e) {
+        console.error(`Error while handling UDP outbound, error ${e.message}`);
+    }
 }
 
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
