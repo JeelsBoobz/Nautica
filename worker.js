@@ -76,7 +76,7 @@ export default {
             const upgradeHeader = request.headers.get("Upgrade");
 
             if (upgradeHeader === "websocket") {
-                const ccPath = url.pathname.match(/^\/cc\/([A-Za-z]{2})$/);
+                const ccPath = url.pathname.match(/^\/free\/cc\/([A-Za-z]{2})$/);
 
                 if (ccPath) {
                     const cc = ccPath[1];
@@ -88,7 +88,28 @@ export default {
                     }
                 }
 
-                const proxyMatch = url.pathname.match(/^\/(.+[:=-]\d+)$/);
+                const trPath = url.pathname.match(/^\/free\/tr\/(.+[:=-]\d+)$/);
+
+                if (trPath) {
+                    proxyIP = trPath[1];
+                    return await websocketHandler(request, atob("VHJvamFu"));
+                }
+
+                const vlPath = url.pathname.match(/^\/free\/vl\/(.+[:=-]\d+)$/);
+
+                if (vlPath) {
+                    proxyIP = vlPath[1];
+                    return await websocketHandler(request, atob("Vkxlc3M"));
+                }
+
+                const ssPath = url.pathname.match(/^\/free\/ss\/(.+[:=-]\d+)$/);
+
+                if (ssPath) {
+                    proxyIP = ssPath[1];
+                    return await websocketHandler(request, atob("U2hhZG93c29ja3M"));
+                }
+
+                const proxyMatch = url.pathname.match(/^\/free\/(.+[:=-]\d+)$/);
 
                 if (proxyMatch) {
                     proxyIP = proxyMatch[1];
@@ -109,7 +130,7 @@ export default {
     },
 };
 
-async function websocketHandler(request) {
+async function websocketHandler(request, protocol = null) {
     const webSocketPair = new WebSocketPair();
     const [client, webSocket] = Object.values(webSocketPair);
 
@@ -143,17 +164,19 @@ async function websocketHandler(request) {
                         return;
                     }
 
-                    const protocol = await protocolSniffer(chunk);
+                    if (protocol === null) {
+                        protocol = await protocolSniffer(chunk);
+                    }
+                    console.log(protocol);
                     let protocolHeader;
 
-                    if (protocol === "Trojan") {
-                        protocolHeader = parseTrojanHeader(chunk);
-                    } else if (protocol === "VLESS") {
-                        protocolHeader = parseVlessHeader(chunk);
-                    } else if (protocol === "Shadowsocks") {
-                        protocolHeader = parseShadowsocksHeader(chunk);
+                    if (protocol === atob("VHJvamFu")) {
+                        protocolHeader = parseTRHeader(chunk);
+                    } else if (protocol === atob("Vkxlc3M")) {
+                        protocolHeader = parseVLHeader(chunk);
+                    } else if (protocol === atob("U2hhZG93c29ja3M")) {
+                        protocolHeader = parseSSHeader(chunk);
                     } else {
-                        parseVmessHeader(chunk);
                         throw new Error("Unknown Protocol!");
                     }
 
@@ -214,23 +237,23 @@ async function websocketHandler(request) {
 
 async function protocolSniffer(buffer) {
     if (buffer.byteLength >= 62) {
-        const trojanDelimiter = new Uint8Array(buffer.slice(56, 60));
-        if (trojanDelimiter[0] === 0x0d && trojanDelimiter[1] === 0x0a) {
-            if (trojanDelimiter[2] === 0x01 || trojanDelimiter[2] === 0x03 || trojanDelimiter[2] === 0x7f) {
-                if (trojanDelimiter[3] === 0x01 || trojanDelimiter[3] === 0x03 || trojanDelimiter[3] === 0x04) {
-                    return "Trojan";
+        const trDelimiter = new Uint8Array(buffer.slice(56, 60));
+        if (trDelimiter[0] === 0x0d && trDelimiter[1] === 0x0a) {
+            if (trDelimiter[2] === 0x01 || trDelimiter[2] === 0x03 || trDelimiter[2] === 0x7f) {
+                if (trDelimiter[3] === 0x01 || trDelimiter[3] === 0x03 || trDelimiter[3] === 0x04) {
+                    return atob("VHJvamFu");
                 }
             }
         }
     }
 
-    const vlessDelimiter = new Uint8Array(buffer.slice(1, 17));
+    const vlDelimiter = new Uint8Array(buffer.slice(1, 17));
     // Hanya mendukung UUID v4
-    if (arrayBufferToHex(vlessDelimiter).match(/^[0-9a-f]{8}[0-9a-f]{4}4[0-9a-f]{3}[89ab][0-9a-f]{3}[0-9a-f]{12}$/i)) {
-        return "VLESS";
+    if (arrayBufferToHex(vlDelimiter).match(/^[0-9a-f]{8}[0-9a-f]{4}4[0-9a-f]{3}[89ab][0-9a-f]{3}[0-9a-f]{12}$/i)) {
+        return atob("Vkxlc3M");
     }
 
-    return "Shadowsocks"; // default
+    return atob("U2hhZG93c29ja3M"); // default
 }
 
 async function handleTCPOutBound(
@@ -359,11 +382,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     return stream;
 }
 
-function parseVmessHeader(vmessBuffer) {
-    // https://xtls.github.io/development/protocols/vmess.html#%E6%8C%87%E4%BB%A4%E9%83%A8%E5%88%86
-}
-
-function parseShadowsocksHeader(ssBuffer) {
+function parseSSHeader(ssBuffer) {
     const view = new DataView(ssBuffer);
 
     const addressType = view.getUint8(0);
@@ -393,7 +412,7 @@ function parseShadowsocksHeader(ssBuffer) {
         default:
             return {
                 hasError: true,
-                message: `Invalid addressType for Shadowsocks: ${addressType}`,
+                message: `Invalid addressType for SS: ${addressType}`,
             };
     }
 
@@ -419,13 +438,13 @@ function parseShadowsocksHeader(ssBuffer) {
     };
 }
 
-function parseVlessHeader(vlessBuffer) {
-    const version = new Uint8Array(vlessBuffer.slice(0, 1));
+function parseVLHeader(vlBuffer) {
+    const version = new Uint8Array(vlBuffer.slice(0, 1));
     let isUDP = false;
 
-    const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
+    const optLength = new Uint8Array(vlBuffer.slice(17, 18))[0];
 
-    const cmd = new Uint8Array(vlessBuffer.slice(18 + optLength, 18 + optLength + 1))[0];
+    const cmd = new Uint8Array(vlBuffer.slice(18 + optLength, 18 + optLength + 1))[0];
     if (cmd === 1) {
     } else if (cmd === 2) {
         isUDP = true;
@@ -436,11 +455,11 @@ function parseVlessHeader(vlessBuffer) {
         };
     }
     const portIndex = 18 + optLength + 1;
-    const portBuffer = vlessBuffer.slice(portIndex, portIndex + 2);
+    const portBuffer = vlBuffer.slice(portIndex, portIndex + 2);
     const portRemote = new DataView(portBuffer).getUint16(0);
 
     let addressIndex = portIndex + 2;
-    const addressBuffer = new Uint8Array(vlessBuffer.slice(addressIndex, addressIndex + 1));
+    const addressBuffer = new Uint8Array(vlBuffer.slice(addressIndex, addressIndex + 1));
 
     const addressType = addressBuffer[0];
     let addressLength = 0;
@@ -449,16 +468,16 @@ function parseVlessHeader(vlessBuffer) {
     switch (addressType) {
         case 1: // For IPv4
             addressLength = 4;
-            addressValue = new Uint8Array(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
+            addressValue = new Uint8Array(vlBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
             break;
         case 2: // For Domain
-            addressLength = new Uint8Array(vlessBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
+            addressLength = new Uint8Array(vlBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
             addressValueIndex += 1;
-            addressValue = new TextDecoder().decode(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+            addressValue = new TextDecoder().decode(vlBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
             break;
         case 3: // For IPv6
             addressLength = 16;
-            const dataView = new DataView(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+            const dataView = new DataView(vlBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
             const ipv6 = [];
             for (let i = 0; i < 8; i++) {
                 ipv6.push(dataView.getUint16(i * 2).toString(16));
@@ -484,13 +503,13 @@ function parseVlessHeader(vlessBuffer) {
         addressType: addressType,
         portRemote: portRemote,
         rawDataIndex: addressValueIndex + addressLength,
-        rawClientData: vlessBuffer.slice(addressValueIndex + addressLength),
+        rawClientData: vlBuffer.slice(addressValueIndex + addressLength),
         version: new Uint8Array([version[0], 0]),
         isUDP: isUDP,
     };
 }
 
-function parseTrojanHeader(buffer) {
+function parseTRHeader(buffer) {
     const socks5DataBuffer = buffer.slice(58);
     if (socks5DataBuffer.byteLength < 6) {
         return {
