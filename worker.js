@@ -77,7 +77,6 @@ export default {
 
             if (upgradeHeader === "websocket") {
                 const ccPath = url.pathname.match(/^\/free\/cc\/([A-Za-z]{2})$/);
-
                 if (ccPath) {
                     const cc = ccPath[1];
                     const ccMatch = getProxyCC(cc, await getProxyList(env, true));
@@ -89,28 +88,30 @@ export default {
                 }
 
                 const trPath = url.pathname.match(/^\/free\/tr\/(.+[:=-]\d+)$/);
-
                 if (trPath) {
                     proxyIP = trPath[1];
                     return await websocketHandler(request, atob("VHJvamFu"));
                 }
 
                 const vlPath = url.pathname.match(/^\/free\/vl\/(.+[:=-]\d+)$/);
-
                 if (vlPath) {
                     proxyIP = vlPath[1];
                     return await websocketHandler(request, atob("Vkxlc3M"));
                 }
 
                 const ssPath = url.pathname.match(/^\/free\/ss\/(.+[:=-]\d+)$/);
-
                 if (ssPath) {
                     proxyIP = ssPath[1];
                     return await websocketHandler(request, atob("U2hhZG93c29ja3M"));
                 }
 
-                const proxyMatch = url.pathname.match(/^\/free\/(.+[:=-]\d+)$/);
+                const freeproxyMatch = url.pathname.match(/^\/free\/(.+[:=-]\d+)$/);
+                if (freeproxyMatch) {
+                    proxyIP = freeproxyMatch[1];
+                    return await websocketHandler(request);
+                }
 
+                const proxyMatch = url.pathname.match(/^\/(.+[:=-]\d+)$/);
                 if (proxyMatch) {
                     proxyIP = proxyMatch[1];
                     return await websocketHandler(request);
