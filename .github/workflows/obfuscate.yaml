@@ -32,10 +32,8 @@ jobs:
           --transform-object-keys true \
           --unicode-escape-sequence true
       - name: Publish Result
-        if: ${{ success() }}
-        run: |
-          git config --global user.name "Github Actions"
-          git config --global user.email "actions@github.com"
-          git add worker.js
-          git commit -m "Upload obfuscated worker"
-          git push origin main --force
+      - name: Archive production artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: |
+            worker.js
