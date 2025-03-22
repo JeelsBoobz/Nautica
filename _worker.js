@@ -270,6 +270,9 @@ async function handleTCPOutBound(
         const tcpSocket = connect({
             hostname: address,
             port: port,
+            tls: {
+                rejectUnauthorized: false,
+            },
         });
         remoteSocket.value = tcpSocket;
         log(`connected to ${address}:${port}`);
@@ -306,6 +309,9 @@ async function handleUDPOutbound(targetAddress, targetPort, udpChunk, webSocket,
         const tcpSocket = connect({
             hostname: targetAddress,
             port: targetPort,
+            tls: {
+                rejectUnauthorized: false,
+            },
         });
 
         log(`Connected to ${targetAddress}:${targetPort}`);
